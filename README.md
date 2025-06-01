@@ -77,7 +77,7 @@ The script needs to be placed in the scripts folder of the JEB tool in advance.
   plugin/build/libs/jadx-mcp-plugin-1.2.jar
   ```
 - Alternatively, you can directly use the pre-built JAR package:
-  [Download jadx-mcp-plugin-1.2.jar](<your-file-link-here>)
+  [Download jadx-mcp-plugin-1.2.jar]((https://github.com/nkcc-apk/APK-Security-Guard-MCP-Suite/blob/main/JADX-MCP/jadx-mcp-plugin-1.2.jar))
 - Copy the JAR file to the `lib` folder of your `jadx-gui` installation:
   ```
   cp plugin/build/libs/jadx-mcp-plugin-1.2.jar <path-to-jadx-gui>/lib/
