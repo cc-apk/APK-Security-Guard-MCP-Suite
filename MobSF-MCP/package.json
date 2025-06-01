@@ -1,0 +1,46 @@
+{
+  "name": "mobsf-mcp",
+  "version": "1.0.0",
+  "description": "a Node.js-based Model Context Protocol implementation for MobSF",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "bin": {
+    "nkcc-apk-mobsf": "build/index.js"
+  },
+  "files": [
+    "build/**/*"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "MobSF",
+    "static analysis",
+    "security",
+    "automation",
+    "multi-control point",
+    "MCP",
+    "security analysis"
+  ],
+  "author": "nkcc-apk",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nkcc-apk/MobSF-MCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nkcc-apk/MobSF-MCP/issues"
+  },
+  "homepage": "https://github.com/nkcc-apk/MobSF-MCP",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "axios": "^1.9.0",
+    "form-data": "^4.0.2",
+    "zod": "^3.25.46"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.57",
+    "typescript": "^5.8.3"
+  }
+}

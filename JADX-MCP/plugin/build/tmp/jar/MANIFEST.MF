@@ -1,0 +1,8 @@
+Manifest-Version: 1.0
+Jadx-Plugin: true
+Jadx-Plugin-Class: com.mobilehackinglab.jadxplugin.McpPlugin
+Jadx-Plugin-Version: 1.2.0
+Jadx-Plugin-Id: jadx-mcp-plugin
+Jadx-Plugin-Description: Exposes Jadx info over HTTP
+Jadx-Plugin-Author: Mobile Hacking Lab
+

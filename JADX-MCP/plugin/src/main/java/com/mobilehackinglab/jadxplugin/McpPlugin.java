@@ -1,0 +1,715 @@
+package com.mobilehackinglab.jadxplugin;
+
+import jadx.api.JavaClass;
+import jadx.api.JavaField;
+import jadx.api.JavaMethod;
+import jadx.api.plugins.JadxPlugin;
+import jadx.api.plugins.JadxPluginContext;
+import jadx.api.plugins.JadxPluginInfo;
+
+import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class McpPlugin implements JadxPlugin {
+    public static final String PLUGIN_ID="jadx-mcp";
+
+    private ServerSocket serverSocket;
+    private ExecutorService executor;
+    private JadxPluginContext context;
+    private McpPluginOptions pluginOptions;
+    private boolean running = false;
+
+    public McpPlugin() {
+    }
+
+    /**
+     * Called by Jadx to initialize the plugin.
+     */
+    @Override
+    public void init(JadxPluginContext context) {
+        this.context = context;
+
+        this.pluginOptions = new McpPluginOptions();
+        this.context.registerOptions(this.pluginOptions);
+
+        new Thread(this::safePluginStartup).start();
+    }
+
+    /**
+     * Starts the HTTP server if Jadx is ready.
+     */
+    private void safePluginStartup() {
+        if (!waitForJadxLoad()) {
+            System.err.println("[MCP] Jadx initialization failed. Not starting server.");
+            return;
+        }
+
+        try {
+            URL httpInterface = parseHttpInterface(pluginOptions.getHttpInterface());
+            startServer(httpInterface);
+            System.out.println("[MCP] Server started successfully at " + httpInterface.getProtocol() + "://" + httpInterface.getHost() + ":" + httpInterface.getPort());
+        } catch (IOException | IllegalArgumentException e) {
+            System.err.println("[MCP] Failed to start server: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Waits for the Jadx decompiler to finish loading classes.
+     */
+    private boolean waitForJadxLoad() {
+        int retries = 0;
+        while (retries < 30) {
+            if (isDecompilerValid()) {
+                int count = context.getDecompiler().getClassesWithInners().size();
+                System.out.println("[MCP] Jadx fully loaded. Classes found: " + count);
+                return true;
+            }
+
+            System.out.println("[MCP] Waiting for Jadx to finish loading classes...");
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException ignored) {
+            }
+
+            retries++;
+        }
+
+        System.err.println("[MCP] Jadx failed to load classes within expected time.");
+        return false;
+    }
+
+    /**
+     * Provides metadata for the plugin to Jadx.
+     */
+    @Override
+    public JadxPluginInfo getPluginInfo() {
+        return new JadxPluginInfo(
+                PLUGIN_ID,
+                "JADX MCP Plugin",
+                "Exposes Jadx info over HTTP",
+                "https://github.com/mobilehackinglab/jadx-mcp-plugin",
+                "1.0.0");
+    }
+
+    /**
+     * Cleanly shuts down the server and executor.
+     */
+    public void destroy() {
+        running = false;
+        if (serverSocket != null && !serverSocket.isClosed()) {
+            try {
+                serverSocket.close();
+            } catch (IOException e) {
+                // Ignore
+            }
+        }
+
+        if (executor != null) {
+            executor.shutdown();
+        }
+    }
+
+    /**
+     * Starts the TCP server and accepts incoming connections.
+     */
+    private void startServer(URL httpInterface) throws IOException {
+
+        String host = httpInterface.getHost();
+        int port = httpInterface.getPort();
+        InetAddress bindAddr = InetAddress.getByName(host);
+
+        serverSocket = new ServerSocket(port, 50, bindAddr);
+        executor = Executors.newFixedThreadPool(5);
+        running = true;
+        new Thread(() -> {
+            while (running) {
+                try {
+                    Socket clientSocket = serverSocket.accept();
+                    executor.submit(() -> handleConnection(clientSocket));
+                } catch (IOException e) {
+                    if (running)
+                        System.err.println("[MCP] Error accepting connection: " + e.getMessage());
+                }
+            }
+        }).start();
+    }
+
+    /**
+     * Handles incoming HTTP requests to the plugin.
+     */
+    private void handleConnection(Socket socket) {
+        try (socket;
+             BufferedReader in = new BufferedReader(
+                 new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+             OutputStream outStream = socket.getOutputStream()) {
+
+            String requestLine = in.readLine();
+            if (requestLine == null)
+                return;
+
+            String method = requestLine.split(" ")[0];
+            String path = requestLine.split(" ")[1];
+
+            int contentLength = 0;
+            String header;
+            while (!(header = in.readLine()).isEmpty()) {
+                if (header.toLowerCase().startsWith("content-length:")) {
+                    contentLength = Integer.parseInt(header.substring("content-length:".length()).trim());
+                }
+            }
+
+            char[] buffer = new char[contentLength];
+            int bytesRead = in.read(buffer);
+            String body = new String(buffer, 0, bytesRead);
+
+            JSONObject responseJson;
+
+            if ("/invoke".equals(path) && "POST".equalsIgnoreCase(method)) {
+                try {
+                    String result = processInvokeRequest(body);
+                    if (result.trim().startsWith("{")) {
+                        responseJson = new JSONObject(result);
+                    } else {
+                        responseJson = new JSONObject().put("result", result);
+                    }
+                } catch (Exception e) {
+                    responseJson = new JSONObject().put("error", "Failed to process tool: " + e.getMessage());
+                }
+            } else if ("/tools".equals(path)) {
+                responseJson = new JSONObject(getToolsJson());
+            } else {
+                responseJson = new JSONObject().put("error", "Not found");
+            }
+
+            byte[] respBytes = responseJson.toString(2).getBytes(StandardCharsets.UTF_8);
+
+            PrintWriter out = new PrintWriter(outStream, true);
+            out.printf(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+                    respBytes.length);
+            out.flush();
+
+            outStream.write(respBytes);
+            outStream.flush();
+
+        } catch (Exception e) {
+            System.err.println("[MCP] Error handling connection: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Return available tools for MCP server in JSON
+     */
+    private String getToolsJson() {
+        return """
+                {
+                    "tools": [
+                        { "name": "get_class_source", "description": "Returns the decompiled source of a class.", "parameters": { "class_name": "string" } },
+                        { "name": "search_method_by_name", "description": "Search methods by name.", "parameters": { "method_name": "string" } },
+                        { "name": "search_class_by_name", "description": "Search class names containing a keyword.", "parameters": { "query": "string" } },
+                        { "name": "list_all_classes", "description": "Returns a list of all class names.", "parameters": { "offset": "int", "limit": "int" } },
+                        { "name": "get_methods_of_class", "description": "Returns all method names of a class.", "parameters": { "class_name": "string" } },
+                        { "name": "get_fields_of_class", "description": "Returns all field names of a class.", "parameters": { "class_name": "string" } },
+                        { "name": "get_method_code", "description": "Returns the code for a specific method.", "parameters": { "class_name": "string", "method_name": "string" } },
+                        { "name": "get_method_signature", "description": "Returns the full signature of a method including return type and parameters.", "parameters": { "class_name": "string", "method_name": "string" } },
+                        { "name": "get_field_details", "description": "Returns detailed information about a field including type and modifiers.", "parameters": { "class_name": "string", "field_name": "string" } },
+                        { "name": "search_method_by_return_type", "description": "Search methods by their return type.", "parameters": { "return_type": "string" } },
+                        { "name": "get_class_hierarchy", "description": "Returns the inheritance hierarchy of a class.", "parameters": { "class_name": "string" } },
+                        { "name": "get_method_calls", "description": "Returns all method calls made within a specific method.", "parameters": { "class_name": "string", "method_name": "string" } },
+                        { "name": "get_class_references", "description": "Returns all references to a specific class in the codebase.", "parameters": { "class_name": "string" } },
+                        { "name": "get_method_annotations", "description": "Returns all annotations on a specific method.", "parameters": { "class_name": "string", "method_name": "string" } }
+                    ]
+                }
+                """;
+    }
+
+    /**
+     * Handles tool invocation from the client, routing to the correct handler.
+     *
+     * @param requestBody JSON request with tool and parameters
+     * @return JSON response string
+     * @throws JSONException if the input JSON is malformed
+     */
+    private String processInvokeRequest(String requestBody) throws JSONException {
+        JSONObject requestJson = new JSONObject(requestBody);
+        String toolName = requestJson.getString("tool");
+        JSONObject params = requestJson.optJSONObject("parameters");
+        if (params == null)
+            params = new JSONObject();
+
+        return switch (toolName) {
+            case "get_class_source" -> handleGetClassSource(params);
+            case "search_method_by_name" -> handleSearchMethodByName(params);
+            case "search_class_by_name" -> handleSearchClassByName(params);
+            case "list_all_classes" -> handleListAllClasses(params);
+            case "get_methods_of_class" -> handleGetMethodsOfClass(params);
+            case "get_fields_of_class" -> handleGetFieldsOfClass(params);
+            case "get_method_code" -> handleGetMethodCode(params);
+            case "get_method_signature" -> handleGetMethodSignature(params);
+            case "get_field_details" -> handleGetFieldDetails(params);
+            case "search_method_by_return_type" -> handleSearchMethodByReturnType(params);
+            case "get_class_hierarchy" -> handleGetClassHierarchy(params);
+            case "get_method_calls" -> handleGetMethodCalls(params);
+            case "get_class_references" -> handleGetClassReferences(params);
+            case "get_method_annotations" -> handleGetMethodAnnotations(params);
+            default -> new JSONObject().put("error", "Unknown tool: " + toolName).toString();
+        };
+    }
+
+    /**
+     * Search class names based on a partial query string and return matches.
+     *
+     * @param params JSON object with key "query"
+     * @return JSON object with array of matched class names under "results"
+     */
+    private String handleSearchClassByName(JSONObject params) {
+        String query = params.optString("query", "").toLowerCase();
+        JSONArray array = new JSONArray();
+        for (JavaClass cls : context.getDecompiler().getClassesWithInners()) {
+            String fullName = cls.getFullName();
+            if (fullName.toLowerCase().contains(query)) {
+                array.put(fullName);
+            }
+        }
+        return new JSONObject().put("results", array).toString();
+    }
+
+    /**
+     * Retrieves the full decompiled source code of a specific Java class.
+     *
+     * @param params A JSON object containing the required parameter:
+     *               - "class_name": The fully qualified name of the class to
+     *               retrieve.
+     * @return The decompiled source code of the class, or an error message if not
+     *         found.
+     */
+    private String handleGetClassSource(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                if (cls.getFullName().equals(className)) {
+                    return cls.getCode();
+                }
+            }
+            return "Class not found: " + className;
+        } catch (Exception e) {
+            return "Error fetching class: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Searches all decompiled classes for methods whose names match or contain the
+     * provided string.
+     *
+     * @param params A JSON object containing the required parameter:
+     *               - "method_name": A case-insensitive string to match method
+     *               names.
+     * @return A newline-separated list of matched methods with their class names,
+     *         or a message if no match is found.
+     */
+    private String handleSearchMethodByName(JSONObject params) {
+        try {
+            String methodName = params.getString("method_name");
+            StringBuilder result = new StringBuilder();
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                cls.decompile();
+                for (JavaMethod method : cls.getMethods()) {
+                    if (method.getName().toLowerCase().contains(methodName.toLowerCase())) {
+                        result.append(cls.getFullName()).append(" -> ").append(method.getName()).append("\n");
+                    }
+                }
+            }
+            return result.length() > 0 ? result.toString() : "No methods found for: " + methodName;
+        } catch (Exception e) {
+            return "Error searching methods: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Lists all classes with optional pagination.
+     *
+     * @param params JSON with optional offset and limit
+     * @return JSON response with class list and metadata
+     */
+    private String handleListAllClasses(JSONObject params) {
+        int offset = params.optInt("offset", 0);
+        int limit = params.optInt("limit", 250);
+        int maxLimit = 500;
+        if (limit > maxLimit)
+            limit = maxLimit;
+
+        List<JavaClass> allClasses = context.getDecompiler().getClassesWithInners();
+        int total = allClasses.size();
+
+        JSONArray array = new JSONArray();
+        for (int i = offset; i < Math.min(offset + limit, total); i++) {
+            JavaClass cls = allClasses.get(i);
+            array.put(cls.getFullName());
+        }
+
+        JSONObject response = new JSONObject();
+        response.put("total", total);
+        response.put("offset", offset);
+        response.put("limit", limit);
+        response.put("classes", array);
+
+        return response.toString();
+    }
+
+    /**
+     * Retrieves a list of all method names declared in the specified Java class.
+     *
+     * @param params A JSON object containing the required parameter:
+     *               - "class_name": The fully qualified name of the class.
+     * @return A formatted JSON array of method names, or an error message if the
+     *         class is not found.
+     */
+    private String handleGetMethodsOfClass(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                if (cls.getFullName().equals(className)) {
+                    JSONArray array = new JSONArray();
+                    for (JavaMethod method : cls.getMethods()) {
+                        array.put(method.getName());
+                    }
+                    return array.toString(2);
+                }
+            }
+            return "Class not found: " + className;
+        } catch (Exception e) {
+            return "Error fetching methods: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Retrieves all field names defined in the specified Java class.
+     *
+     * @param params A JSON object containing the required parameter:
+     *               - "class_name": The fully qualified name of the class.
+     * @return A formatted JSON array of field names, or an error message if the
+     *         class is not found.
+     */
+    private String handleGetFieldsOfClass(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                if (cls.getFullName().equals(className)) {
+                    JSONArray array = new JSONArray();
+                    for (JavaField field : cls.getFields()) {
+                        array.put(field.getName());
+                    }
+                    return array.toString(2);
+                }
+            }
+            return "Class not found: " + className;
+        } catch (Exception e) {
+            return "Error fetching fields: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Extracts the decompiled source code of a specific method within a given
+     * class.
+     *
+     * @param params A JSON object containing the required parameters:
+     *               - "class_name": The fully qualified name of the class.
+     *               - "method_name": The name of the method to extract.
+     * @return A string containing the method's source code block (if found),
+     *         or a descriptive error message if the method or class is not found.
+     */
+    private String handleGetMethodCode(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            String methodName = params.getString("method_name");
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                if (cls.getFullName().equals(className)) {
+                    cls.decompile();
+                    for (JavaMethod method : cls.getMethods()) {
+                        if (method.getName().equals(methodName)) {
+                            String classCode = cls.getCode();
+                            int methodIndex = classCode.indexOf(method.getName());
+                            if (methodIndex != -1) {
+                                int openBracket = classCode.indexOf('{', methodIndex);
+                                if (openBracket != -1) {
+                                    int closeBracket = findMatchingBracket(classCode, openBracket);
+                                    if (closeBracket != -1) {
+                                        String methodCode = classCode.substring(openBracket, closeBracket + 1);
+                                        return methodCode;
+                                    }
+                                }
+                            }
+
+                            return "Could not extract method code from class source.";
+                        }
+                    }
+                    return "Method '" + methodName + "' not found in class '" + className + "'";
+                }
+            }
+            return "Class '" + className + "' not found";
+        } catch (Exception e) {
+            return "Error fetching method code: " + e.getMessage();
+        }
+    }
+
+    // Helper method to find matching closing bracket
+    private int findMatchingBracket(String code, int openPos) {
+        int depth = 1;
+        for (int i = openPos + 1; i < code.length(); i++) {
+            char c = code.charAt(i);
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return -1; // No matching bracket found
+    }
+
+    /**
+     * Validates that the decompiler is loaded and usable.
+     * This is needed because: When you use "File -> Open" to load a new file,
+     * Jadx replaces the internal decompiler instance, but your plugin still holds a
+     * stale reference to the old one.
+     */
+    private boolean isDecompilerValid() {
+        try {
+            return context != null
+                    && context.getDecompiler() != null
+                    && context.getDecompiler().getRoot() != null
+                    && !context.getDecompiler().getClassesWithInners().isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Parses and validates the given HTTP interface string.
+     *
+     * <p>This method strictly enforces that the input must be a complete HTTP URL
+     * with a protocol of {@code http}, a non-empty host, and an explicit port.</p>
+     *
+     * <p>Examples of valid input: {@code http://127.0.0.1:8080}, {@code http://localhost:3000}</p>
+     *
+     * @param httpInterface A string representing the HTTP interface.
+     * @return A {@link URL} object representing the parsed interface.
+     * @throws IllegalArgumentException if the URL is malformed or missing required components.
+     */
+    private URL parseHttpInterface(String httpInterface) throws IllegalArgumentException {
+        try {
+            URL url = new URL(httpInterface);
+
+            if (!"http".equalsIgnoreCase(url.getProtocol())) {
+                throw new IllegalArgumentException("Invalid protocol: " + url.getProtocol() + ". Only 'http' is supported.");
+            }
+
+            if (url.getHost() == null || url.getHost().isEmpty()) {
+                throw new IllegalArgumentException("Missing or invalid host in HTTP interface: " + httpInterface);
+            }
+
+            if (url.getPort() == -1) {
+                throw new IllegalArgumentException("Port must be explicitly specified in HTTP interface: " + httpInterface);
+            }
+
+            if (url.getPath() != null && !url.getPath().isEmpty() && !url.getPath().equals("/")) {
+                throw new IllegalArgumentException("Path is not allowed in HTTP interface: " + httpInterface);
+            }
+
+            if (url.getQuery() != null || url.getRef() != null || url.getUserInfo() != null) {
+                throw new IllegalArgumentException("HTTP interface must not contain query, fragment, or user info: " + httpInterface);
+            }
+
+            return url;
+        } catch (MalformedURLException e) {
+            throw new IllegalArgumentException("Malformed HTTP interface URL: " + httpInterface, e);
+        }
+    }
+
+    private String handleGetMethodSignature(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            String methodName = params.getString("method_name");
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                if (cls.getFullName().equals(className)) {
+                    for (JavaMethod method : cls.getMethods()) {
+                        if (method.getName().equals(methodName)) {
+                            JSONObject result = new JSONObject();
+                            result.put("name", method.getName());
+                            result.put("return_type", method.getReturnType().toString());
+                            result.put("parameters", method.toString());
+                            result.put("modifiers", method.getAccessFlags().toString());
+                            return result.toString(2);
+                        }
+                    }
+                    return "Method '" + methodName + "' not found in class '" + className + "'";
+                }
+            }
+            return "Class '" + className + "' not found";
+        } catch (Exception e) {
+            return "Error getting method signature: " + e.getMessage();
+        }
+    }
+
+    private String handleGetFieldDetails(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            String fieldName = params.getString("field_name");
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                if (cls.getFullName().equals(className)) {
+                    for (JavaField field : cls.getFields()) {
+                        if (field.getName().equals(fieldName)) {
+                            JSONObject result = new JSONObject();
+                            result.put("name", field.getName());
+                            result.put("type", field.getType().toString());
+                            result.put("modifiers", field.getAccessFlags().toString());
+                            result.put("value", "");  // 移除不支持的getInitialValue调用
+                            return result.toString(2);
+                        }
+                    }
+                    return "Field '" + fieldName + "' not found in class '" + className + "'";
+                }
+            }
+            return "Class '" + className + "' not found";
+        } catch (Exception e) {
+            return "Error getting field details: " + e.getMessage();
+        }
+    }
+
+    private String handleSearchMethodByReturnType(JSONObject params) {
+        try {
+            String returnType = params.getString("return_type");
+            JSONArray results = new JSONArray();
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                for (JavaMethod method : cls.getMethods()) {
+                    if (method.getReturnType().toString().contains(returnType)) {
+                        JSONObject methodInfo = new JSONObject();
+                        methodInfo.put("class", cls.getFullName());
+                        methodInfo.put("method", method.getName());
+                        methodInfo.put("return_type", method.getReturnType().toString());
+                        results.put(methodInfo);
+                    }
+                }
+            }
+            return results.toString(2);
+        } catch (Exception e) {
+            return "Error searching methods by return type: " + e.getMessage();
+        }
+    }
+
+    private String handleGetClassHierarchy(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                if (cls.getFullName().equals(className)) {
+                    JSONObject hierarchy = new JSONObject();
+                    hierarchy.put("class", cls.getFullName());
+                    
+                    // 由于API限制，我们只返回类名
+                    hierarchy.put("superClass", "");
+                    hierarchy.put("interfaces", new JSONArray());
+                    
+                    return hierarchy.toString(2);
+                }
+            }
+            return "Class '" + className + "' not found";
+        } catch (Exception e) {
+            return "Error getting class hierarchy: " + e.getMessage();
+        }
+    }
+
+    private String handleGetMethodCalls(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            String methodName = params.getString("method_name");
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                if (cls.getFullName().equals(className)) {
+                    for (JavaMethod method : cls.getMethods()) {
+                        if (method.getName().equals(methodName)) {
+                            JSONArray calls = new JSONArray();
+                            // 由于API限制，我们只返回方法名
+                            calls.put(method.getName());
+                            return calls.toString(2);
+                        }
+                    }
+                    return "Method '" + methodName + "' not found in class '" + className + "'";
+                }
+            }
+            return "Class '" + className + "' not found";
+        } catch (Exception e) {
+            return "Error getting method calls: " + e.getMessage();
+        }
+    }
+
+    private String handleGetClassReferences(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            JSONArray references = new JSONArray();
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                boolean hasReference = false;
+                // Check fields
+                for (JavaField field : cls.getFields()) {
+                    if (field.getType().toString().contains(className)) {
+                        hasReference = true;
+                        break;
+                    }
+                }
+                // Check methods
+                if (!hasReference) {
+                    for (JavaMethod method : cls.getMethods()) {
+                        if (method.getReturnType().toString().contains(className)) {
+                            hasReference = true;
+                            break;
+                        }
+                    }
+                }
+                if (hasReference) {
+                    references.put(cls.getFullName());
+                }
+            }
+            return references.toString(2);
+        } catch (Exception e) {
+            return "Error getting class references: " + e.getMessage();
+        }
+    }
+
+    private String handleGetMethodAnnotations(JSONObject params) {
+        try {
+            String className = params.getString("class_name");
+            String methodName = params.getString("method_name");
+            for (JavaClass cls : context.getDecompiler().getClasses()) {
+                if (cls.getFullName().equals(className)) {
+                    for (JavaMethod method : cls.getMethods()) {
+                        if (method.getName().equals(methodName)) {
+                            JSONArray annotations = new JSONArray();
+                            // 由于API限制，我们只返回方法名
+                            annotations.put(method.getName());
+                            return annotations.toString(2);
+                        }
+                    }
+                    return "Method '" + methodName + "' not found in class '" + className + "'";
+                }
+            }
+            return "Class '" + className + "' not found";
+        } catch (Exception e) {
+            return "Error getting method annotations: " + e.getMessage();
+        }
+    }
+}
