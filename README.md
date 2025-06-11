@@ -159,11 +159,11 @@ JAVA_HOME = os.getenv("JAVA_HOME")
 command = [
     "java",
     "-jar",
-    FLOWDROID_JAR_PATH,  # 确保路径正确
+    FLOWDROID_JAR_PATH,  # Make sure the path is correct
     "-a", apk_path,
     "-o", output_dir,
-    "-p", "Android\\Sdk\\platforms",  # 必须指定 platforms 目录
-    "-s", "FlowDroid-MCP\\script\\SourcesAndSinks.txt",  # 必须指定源/汇文件
+    "-p", "Android\\Sdk\\platforms",  # The platforms directory must be specified
+    "-s", "FlowDroid-MCP\\script\\SourcesAndSinks.txt",  # You must specify a source/sink file
 ]
 ```
 
@@ -406,6 +406,72 @@ MobSF provides detailed section-specific APIs for accessing different parts of t
 
 ---
 
+## 🧠 Multi-expert decision model
+
+This project uses the "multi-expert decision" model to conduct a comprehensive analysis of APK security. This model draws on the idea of ​​independent judgment and collective decision-making of multiple experts, and combines the MCP interface of 5 mainstream reverse analysis tools (JEB, JADX, APKTool, FlowDroid, MobSF), which greatly improves the comprehensiveness of vulnerability discovery and the credibility of the results.
+
+### Analysis process overview
+
+1. **Multiple experts answer independently**
+- 5 reverse analysis tools (MCP) independently perform static analysis on the same APK and automatically generate their own vulnerability reports.
+- Each tool, as an "expert", independently discovers potential security issues from different perspectives and technical details.
+
+2. **Big model frequency statistics and ranking**
+- Use the big model to merge, deduplicate and content analyze the vulnerabilities output by all tools, count the frequency of each vulnerability in the 5 tool reports, and record its source.
+- Rank all vulnerabilities by frequency of occurrence. The higher the frequency, the more reliable it is.
+
+3. **Local priority screening and diversion**
+- The top 60% of high-frequency vulnerabilities (i.e., vulnerabilities that appear more frequently and are more reliable in the five tools) are automatically retained locally.
+- The bottom 40% of vulnerabilities are divided into two categories:
+  - **No MobSF source**: that is, vulnerabilities that are only discovered by other reverse tools are all retained.
+  - **With MobSF source**: that is, low-frequency vulnerabilities that only appear in MobSF reports are handed over to the big model for further evaluation of their danger, and only high-risk vulnerabilities are retained.
+
+4. **Final comprehensive integration**
+All high-priority vulnerabilities, unique vulnerabilities, and MobSF vulnerabilities that are evaluated as high-risk by the big model are integrated locally in the third step to generate the final comprehensive vulnerability analysis report.
+
+### CrossValidation_APKAnalysis MCP
+
+**✨ Main API Functions:**
+
+| API | Description |
+|-----|-------------|
+| `analyze_with_jeb/jadx/apktool/flowdroid/mobsf(apk_path)` | Analyze APK independently using the JEB/JADX/APKTool/FlowDroid/MobSF MCP tool and generate a standardized vulnerability report. Parameter: `apk_path` (APK file path). |
+| `combine_analysis_results(report_paths)` | Merge the reports from all 5 tools, count the frequency and source of each vulnerability, and sort by component weight to generate a preliminary comprehensive report. Parameter: `report_paths` (list of report file paths). |
+| `split_vulnerabilities_by_priority(combined_report_path)` | Divide vulnerabilities into three categories based on frequency: high priority (top 60%), low priority without MobSF source, and low priority with only MobSF source, and save them separately. Parameter: `combined_report_path` (path to the combined report). |
+| `assess_vulnerability_risk(mobsf_low_priority_path)` | For low-priority vulnerabilities only from MobSF, call the large model for risk assessment and keep only high-risk vulnerabilities. Parameter: `mobsf_low_priority_path` (path to MobSF-only low-priority vulnerabilities). |
+| `integrate_priority_reports(high_priority_path, unique_low_priority_path, high_risk_mobsf_path)` | Integrate high-priority, unique low-priority, and high-risk MobSF vulnerabilities to generate the final comprehensive analysis report. Parameters: `high_priority_path`, `unique_low_priority_path`, `high_risk_mobsf_path` (paths to each report). |
+
+**Parameter notes:**
+- `apk_path`: Absolute path to the APK file to be analyzed.
+- `report_paths`: List of standardized report file paths from each tool.
+- `combined_report_path`: Path to the merged preliminary comprehensive report.
+- `mobsf_low_priority_path`: Path to low-priority vulnerabilities only from MobSF.
+- `high_priority_path`, `unique_low_priority_path`, `high_risk_mobsf_path`: Paths to different priority vulnerability reports.
+
+### 🖥️ VSCode Cline Extension Configuration
+
+To use this project with the [cline](https://marketplace.visualstudio.com/items?itemName=cline-tools.cline) extension in VSCode, add the following configuration to your cline configuration file:
+
+```json
+{
+  "mcpServers": {
+   "apk_analysis": {
+      "disabled": false,
+      "timeout": 60,
+      "command": "myenv\\Scripts\\python.exe",
+      "args": [
+        "CrossValidation_APKAnalysis.py"
+      ],
+      "transportType": "stdio"
+    }
+  }
+}
+```
+
+Through the above process, the project has achieved multi-tool, multi-perspective vulnerability discovery and automated decision-making, greatly improving the comprehensiveness, accuracy and practical value of the analysis results.
+
+---
+
 ## 📜 License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
@@ -448,3 +514,4 @@ We warmly welcome contributions from the community! Whether you're fixing bugs, 
 - 💻 Submit pull requests 
 
 We strive to make this project better together. Your contributions help make this tool more powerful and useful for the entire security research community.
+
