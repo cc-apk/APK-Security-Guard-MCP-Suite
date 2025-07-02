@@ -11,7 +11,7 @@ This project aims to provide a one-stop automated solution for Android APK secur
 ---
 
 ## 🎬 Effect display
-
+![效果演示](demo.gif)
 https://github.com/cc-apk/APK-Security-Guard-MCP-Suite/blob/main/demo.gif
 <video controls width="100%">
   <source src="https://github.com/cc-apk/APK-Security-Guard-MCP-Suite/blob/main/demo.gif" type="video/mp4">
