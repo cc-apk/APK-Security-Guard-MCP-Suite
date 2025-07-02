@@ -12,8 +12,7 @@ This project aims to provide a one-stop automated solution for Android APK secur
 
 ## 🎬 Effect display
 
-Waiting for the video to upload...
-
+![demo](https://github.com/cc-apk/APK-Security-Guard-MCP-Suite/blob/main/demo.gif)
 ---
 
 ## ⚙️ Configuration Instructions
