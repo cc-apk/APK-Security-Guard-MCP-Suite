@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/cc-apk-apk-security-guard-mcp-suite-badge.png)](https://mseep.ai/app/cc-apk-apk-security-guard-mcp-suite)
+
 # 🚦 APK Security Guard MCP Suite
 
 [![Platform](https://img.shields.io/badge/platform-Android-green.svg)](https://www.android.com/)
